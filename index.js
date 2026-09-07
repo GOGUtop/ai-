@@ -1,10 +1,16 @@
 import {relayPrompt,cleanDraft} from './core.mjs';
-import {previousAssistant,presetText,readWorldbooks,clampPosition} from './context.mjs';
+import {previousAssistant,readWorldbooks,clampPosition} from './context.mjs';
+import {generateNative,validateNativePreset} from './native.mjs';
+import {makeOracleBridge} from './oracle/bridge.mjs';
 const ctx=()=>globalThis.SillyTavern?.getContext?.();
 const helper=()=>globalThis.TavernHelper;
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const MODULE='writer_ai_relay';
 let busy=false,config=null,models=[],panel,apiDraft=null,presetNames=[],lastContext='',apiStatus='';
+const oracle=makeOracleBridge({namespace:MODULE,kind:'relay',context:ctx,call:async(messages,options)=>{
+  const response=await fetch('/api/plugins/writer-ai-relay-server/generate',{method:'POST',credentials:'same-origin',headers:{...(ctx()?.getRequestHeaders?.()||{}),'Content-Type':'application/json'},body:JSON.stringify({messages,maxTokens:options?.maxTokens}),signal:options?.signal});
+  const result=await response.json();if(!response.ok||result.ok===false)throw new Error(result.error||`HTTP ${response.status}`);return result.content;
+}});
 const scope=()=>`${ctx()?.groupId||ctx()?.characters?.[ctx()?.characterId]?.avatar||''}|${ctx()?.chatId||''}`;
 const defaults=()=>({text:'',note:'',perspective:'第二人称',options:['扩写'],intensity:0,draft:'',readPrevious:true,readCharacter:false,readWorldbook:false,useCustom:false,customPrompt:'',usePreset:false,presetSource:'current',importedPreset:null,importedName:''});
 function data(){const c=ctx();c.chatMetadata||={};const saved=c.chatMetadata[MODULE]||{};return c.chatMetadata[MODULE]={...defaults(),...saved};}
@@ -31,27 +37,38 @@ function render(){
   <section class="relay-sources"><h3>参考来源</h3>${toggle('readPrevious','读取上一段 AI 回复',d.readPrevious)}<details data-section="previous"><summary>上一段 AI 回复${previous?' · '+esc(previous.name):' · 暂无'}</summary><div class="relay-previous">${esc(previous?.text||'暂无 AI 回复')}</div></details>${toggle('readCharacter','帮写前读取角色卡',d.readCharacter)}${toggle('readWorldbook','帮写前读取世界书',d.readWorldbook)}${toggle('useCustom','启用自定义提示词',d.useCustom)}<div data-custom-fields ${d.useCustom?'':'hidden'}><label>自定义帮写提示词<textarea name="customPrompt" rows="4">${esc(d.customPrompt)}</textarea></label></div>${toggle('usePreset','使用写作预设',d.usePreset)}<div data-preset-fields ${d.usePreset?'':'hidden'}><label>预设来源<select name="presetSource"><option value="current" ${d.presetSource==='current'?'selected':''}>酒馆当前预设</option>${presetNames.map(n=>`<option value="saved:${esc(n)}" ${d.presetSource==='saved:'+n?'selected':''}>${esc(n)}</option>`).join('')}<option value="imported" ${d.presetSource==='imported'?'selected':''}>单独导入的预设</option></select></label><div class="relay-actions"><button type="button" data-relay-import><i class="fa-solid fa-file-import"></i> 导入预设 JSON</button><button type="button" data-relay-refresh-presets title="刷新预设列表"><i class="fa-solid fa-rotate"></i></button></div><small>${esc(d.importedName||'未导入独立预设')}</small><input type="file" accept=".json,application/json" data-relay-file hidden></div></section>
   <label>用户要发送的话<textarea name="text" rows="3" required>${esc(d.text)}</textarea></label><label>给作家的要求<textarea name="note" rows="2">${esc(d.note)}</textarea></label><fieldset><legend>本轮写作目标</legend><div class="relay-options">${['扩写','润色','加强情绪','搞笑','人前显圣','战斗加强','描写强化'].map(v=>`<label><input type="checkbox" name="option" value="${v}" ${d.options.includes(v)?'checked':''}>${v}</label>`).join('')}</div></fieldset><label>亲密描写强度 <output data-relay-intensity>${d.intensity}</output><input name="intensity" type="range" min="0" max="3" step="1" value="${d.intensity}"></label><div class="relay-actions"><button type="submit" class="relay-primary" ${busy?'disabled':''}><i class="fa-solid fa-wand-magic-sparkles"></i> ${busy?'正在生成…':'生成我的下一句话'}</button><button type="button" data-relay-clear-note title="清空作者要求"><i class="fa-solid fa-eraser"></i></button></div><output class="relay-context-status">${esc(lastContext)}</output><label>生成预览<textarea name="draft" rows="6">${esc(d.draft)}</textarea></label><div class="relay-actions"><button type="button" data-relay-insert ${busy?'disabled':''}>放入输入框</button><button type="button" data-relay-send ${busy?'disabled':''}>发送到酒馆</button></div></form>
   <details data-section="api"><summary>独立 API 设置</summary><form data-relay-api><label>API 地址<input name="baseUrl" type="url" value="${esc(api.baseUrl)}" placeholder="https://example.com/v1" required></label><label>API Key<input name="apiKey" type="password" value="${esc(apiDraft?.apiKey||'')}" autocomplete="off" placeholder="${config?.send?.hasApiKey?'已保存，留空保留':'填写密钥'}"></label><label>模型<input name="model" list="relay-models" value="${esc(api.model)}"><datalist id="relay-models">${models.map(m=>`<option value="${esc(m)}">`).join('')}</datalist></label><label>最大输出长度<input name="maxTokens" type="number" min="128" max="16000" value="${api.maxTokens||1600}"></label><div class="relay-actions"><button>保存配置</button><button type="button" data-relay-models>拉取模型</button><button type="button" data-relay-test>测试连接</button></div><output id="relay-api-status">${esc(apiStatus)}</output></form></details>`;
+  const oracleButton=document.createElement('button');oracleButton.type='button';oracleButton.dataset.relayOracle='';oracleButton.innerHTML='<i class="fa-solid fa-masks-theater"></i> 人格与提示词';panel.querySelector('.relay-sources').append(oracleButton);
+  if(d.draftDisplay&&globalThis.DOMPurify){
+    const preview=document.createElement('details');preview.dataset.section='regex-preview';
+    preview.innerHTML='<summary>预设正则显示</summary>';
+    const frame=document.createElement('iframe');frame.title='预设正则显示';frame.setAttribute('sandbox','');
+    const html=globalThis.DOMPurify.sanitize(d.draftDisplay,{FORBID_TAGS:['script','iframe','object','embed','form','meta','base','link'],FORBID_ATTR:['href','srcset','action']});
+    frame.srcdoc=`<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>body{font:14px/1.6 system-ui;overflow-wrap:anywhere;margin:12px}img{max-width:100%}</style>${html}`;
+    preview.append(frame);panel.querySelector('[data-relay-main]').append(preview);
+  }
   for(const key of opened)panel.querySelector(`[data-section="${key}"]`)?.setAttribute('open','');panel.scrollTop=scroll;
 }
 async function refreshPresets(){presetNames=await helper()?.getPresetNames?.()||[];}
-async function selectedPreset(d){
-  if(d.presetSource==='imported'){if(!d.importedPreset)throw new Error('请先导入独立预设 JSON');return d.importedPreset;}
-  if(helper()?.getPreset)return helper().getPreset(d.presetSource==='current'?'in_use':d.presetSource.slice(6));
-  const settings=ctx()?.chatCompletionSettings;if(d.presetSource==='current'&&settings?.prompts)return settings;
-  throw new Error('当前酒馆没有可读取的预设接口，请单独导入预设 JSON');
-}
 async function generate(){
   if(busy)return;capture();captureApi();const d=structuredClone(data()),start=scope();busy=true;lastContext='正在准备参考资料';render();
   try{
     const character=ctx().characters?.[ctx().characterId]||{};const userName=ctx().name1;
+    const oraclePreset=oracle.selectedNativePreset();
+    if(d.usePreset||oraclePreset){
+      lastContext='正在使用酒馆原生预设编排、世界书激活和正则';render();
+      const result=await generateNative({d:oraclePreset?{...d,presetSource:'imported',importedPreset:oraclePreset}:d,helper:helper(),context:ctx,request,scope,extraInstructions:()=>oracle.instructions({forNative:true})});
+      if(scope()!==start)return;
+      if(!result.draft.trim())throw new Error('预设正则处理后没有可用文本，请检查正则作用范围');
+      Object.assign(data(),{draft:result.draft,draftDisplay:result.display});
+      lastContext=`原生预设已执行 · ${result.regexCount} 条启用正则 · 独立接力 API`;save();return;
+    }
     const previous=d.readPrevious?previousAssistant(rows(),userName):null;
     const books=d.readWorldbook?await readWorldbooks(helper(),character,(p,b)=>request(p,b,true)):{text:'',count:0};
-    const preset=d.usePreset?presetText(await selectedPreset(d),{userName,characterName:ctx().name2,characterId:ctx().characterId}):'';
     if(scope()!==start)return;
-    lastContext=[d.readPrevious?`上一段 ${previous?.text.length||0} 字`:'',d.readCharacter?'角色卡已读取':'',d.readWorldbook?`世界书 ${books.count} 条`:'',d.usePreset?`预设 ${preset.length} 字`:'',d.useCustom?'自定义提示词已启用':''].filter(Boolean).join(' · ');
-    const messages=relayPrompt({...d,userName,character:d.readCharacter?{name:character.name,description:character.description||character.data?.description,personality:character.personality||character.data?.personality,scenario:character.scenario||character.data?.scenario,persona:ctx().powerUserSettings?.persona_description}: {},previous:previous?.text||'',worldbook:books.text,writingPreset:preset,customPrompt:d.useCustom?d.customPrompt:''});
-    const response=await request('/generate',{messages});if(scope()!==start)return;
-    const draft=cleanDraft(response.content);if(!draft)throw new Error('模型未返回可用正文');Object.assign(data(),{draft});save();
+    lastContext=[d.readPrevious?`上一段 ${previous?.text.length||0} 字`:'',d.readCharacter?'角色卡已读取':'',d.readWorldbook?`世界书 ${books.count} 条`:'',d.useCustom?'自定义提示词已启用':''].filter(Boolean).join(' · ');
+    const messages=relayPrompt({...d,userName,character:d.readCharacter?{name:character.name,description:character.description||character.data?.description,personality:character.personality||character.data?.personality,scenario:character.scenario||character.data?.scenario,persona:ctx().powerUserSettings?.persona_description}: {},previous:previous?.text||'',worldbook:books.text,customPrompt:d.useCustom?d.customPrompt:''});
+    const response=await request('/generate',{messages:oracle.compose(messages)});if(scope()!==start)return;
+    const draft=cleanDraft(response.content);if(!draft)throw new Error('模型未返回可用正文');Object.assign(data(),{draft,draftDisplay:''});save();
   }catch(e){if(scope()===start){lastContext=e.message;notify(e.message,'error');}}finally{busy=false;render();}
 }
 async function insert(send){capture();if(!data().draft.trim())throw new Error('请先生成或填写预览内容');const input=document.querySelector('#send_textarea');if(!input)throw new Error('未找到酒馆输入框');if(input.value.trim()&&input.value!==data().draft&&!confirm('输入框已有文字，是否替换为接力预览？'))return;input.value=data().draft;input.dispatchEvent(new Event('input',{bubbles:true}));injectNote();if(send){const button=document.querySelector('#send_but');if(!button||button.disabled)throw new Error('酒馆当前不能发送，请稍后再试');button.click();}panel.close();input.focus();}
@@ -69,9 +86,10 @@ function init(){
   const launcher=document.createElement('button');launcher.id='writer-relay-launcher';launcher.title='AI 接力';launcher.setAttribute('aria-label','AI 接力');launcher.innerHTML='<i class="fa-solid fa-pen-nib"></i>';document.body.append(launcher);dragLauncher(launcher);
   launcher.addEventListener('click',async()=>{if(panel.open)return;const openedScope=scope();render();panel.showModal();try{if(!config)config=(await request('/config')).config;await refreshPresets();if(scope()!==openedScope)return;capture();if(!apiDraft)apiDraft={...config?.send,apiKey:''};render();}catch(e){apiStatus=e.message;notify(e.message,'warning');}});
   panel.addEventListener('input',e=>{if(e.target.closest('[data-relay-api]'))captureApi();if(e.target.closest('[data-relay-main]')){capture();panel.querySelector('[data-custom-fields]').hidden=!data().useCustom;panel.querySelector('[data-preset-fields]').hidden=!data().usePreset;panel.querySelector('[data-relay-intensity]').textContent=data().intensity;}});
-  panel.addEventListener('change',async e=>{if(!e.target.hasAttribute('data-relay-file'))return;const file=e.target.files?.[0],start=scope();if(!file)return;try{if(file.size>5*1024*1024)throw new Error('预设文件超过5MB');const preset=JSON.parse((await file.text()).replace(/^\uFEFF/,''));presetText(preset);if(scope()!==start)return;capture();Object.assign(data(),{importedPreset:preset,importedName:file.name,presetSource:'imported',usePreset:true});save();render();}catch(err){notify(err.message,'error');}});
+  panel.addEventListener('change',async e=>{if(!e.target.hasAttribute('data-relay-file'))return;const file=e.target.files?.[0],start=scope();if(!file)return;try{if(file.size>5*1024*1024)throw new Error('预设文件超过5MB');const preset=JSON.parse((await file.text()).replace(/^\uFEFF/,''));validateNativePreset(preset);if(scope()!==start)return;capture();Object.assign(data(),{importedPreset:preset,importedName:file.name,presetSource:'imported',usePreset:true});save();render();}catch(err){notify(err.message,'error');}});
   panel.addEventListener('submit',async e=>{e.preventDefault();try{if(e.target.hasAttribute('data-relay-main'))await generate();else{const payload=formConfig();config=(await request('/config',payload)).config;apiDraft=null;apiStatus='配置已保存';capture();render();}}catch(err){notify(err.message,'error');}});
   panel.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try{
+    if(b.hasAttribute('data-relay-oracle')){capture();oracle.open();}
     if(b.hasAttribute('data-relay-close')){capture();captureApi();panel.close();}
     if(b.hasAttribute('data-relay-clear-note')){capture();data().note='';save();injectNote();render();}
     if(b.hasAttribute('data-relay-import'))panel.querySelector('[data-relay-file]').click();

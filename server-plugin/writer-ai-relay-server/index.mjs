@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {createNativeSession} from './native-session.mjs';
 
 const PLUGIN_ID = 'writer-ai-relay-server';
-const VERSION = '1.0.0';
+const VERSION = '1.2.0';
 const DATA_ROOT = path.resolve(globalThis.DATA_ROOT || path.join(process.cwd(), 'data'));
 const ROOT_DIR = path.basename(DATA_ROOT) === 'default-user'
   ? path.join(DATA_ROOT, 'writer-ai-relay')
@@ -246,6 +247,21 @@ export async function init(router) {
     res.json({ ok: true, version: VERSION, health: publicHealth(config) });
   });
   router.get('/config', (_req, res) => res.json({ ok: true, config: publicConfig(loadConfig()) }));
+  const nativeSessions=new Map();
+  router.post('/native-session',async(req,res)=>{
+    try {
+      if(nativeSessions.size>=8)throw new Error('接力原生请求过多，请稍后重试');
+      const session=await createNativeSession(loadConfig().send);
+      const expiry=setTimeout(()=>{session.close();nativeSessions.delete(session.key);},180000);expiry.unref();
+      nativeSessions.set(session.key,{session,expiry,owner:req.user?.profile?.handle});
+      res.json({ok:true,apiurl:session.apiurl,key:session.key,model:session.model});
+    }catch(e){res.status(400).json({ok:false,error:e.message});}
+  });
+  router.post('/native-session/close',(req,res)=>{
+    const record=nativeSessions.get(req.body?.key);
+    if(record&&record.owner===req.user?.profile?.handle){record.session.close();clearTimeout(record.expiry);nativeSessions.delete(req.body.key);}
+    res.json({ok:true});
+  });
   router.post('/config', (req, res) => {
     try {
       const previous = loadConfig();
@@ -280,6 +296,7 @@ export async function init(router) {
   router.post('/generate', async (req, res) => {
     try {
       const config = loadConfig();
+      if(Number.isFinite(Number(req.body?.maxTokens)))config.send.maxTokens=Math.max(128,Math.min(16000,Number(req.body.maxTokens)));
       const result = await callSlot(config, 'send', safeMessages(req.body?.messages));
       res.json({ ok: true, provider: 'send', ...result });
     } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }

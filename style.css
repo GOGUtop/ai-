@@ -21,3 +21,4 @@
 #writer-relay-dialog button{border:1px solid #a9b9af;border-radius:5px;padding:8px 12px;background:#e4eee7;color:#193624;cursor:pointer;font:inherit;max-width:100%;white-space:normal}
 #writer-relay-dialog button:disabled{opacity:.5;cursor:wait}#writer-relay-dialog button:hover{background:#cddfd2}#writer-relay-dialog details{border-top:1px solid #ccd4ce;margin-top:18px;padding-top:12px}#writer-relay-dialog textarea{min-height:70px}#writer-relay-dialog summary{cursor:pointer;font-weight:600}
 @media(max-width:480px){#writer-relay-dialog{padding:14px}#writer-relay-dialog header strong{font-size:17px}.relay-actions button{flex:1}}
+#writer-relay-dialog iframe{display:block;width:100%;height:300px;border:1px solid #ccd4ce;background:white;box-sizing:border-box}
