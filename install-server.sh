@@ -12,13 +12,14 @@ if [ ! -d "$ST_DIR" ] || [ ! -f "$ST_DIR/package.json" ]; then
   exit 1
 fi
 
-if [ ! -f "$SOURCE_DIR/index.mjs" ]; then
+if [ ! -f "$SOURCE_DIR/index.mjs" ] || [ ! -f "$SOURCE_DIR/native-session.mjs" ]; then
   echo "安装包缺少服务端插件：$SOURCE_DIR" >&2
   exit 1
 fi
 
 mkdir -p "$TARGET_DIR"
 cp "$SOURCE_DIR/index.mjs" "$TARGET_DIR/index.mjs"
+cp "$SOURCE_DIR/native-session.mjs" "$TARGET_DIR/native-session.mjs"
 cp "$SOURCE_DIR/package.json" "$TARGET_DIR/package.json"
 
 echo "服务端插件已安装到：$TARGET_DIR"
